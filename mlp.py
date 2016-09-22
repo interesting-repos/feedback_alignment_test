@@ -1,5 +1,11 @@
 #!env python
 # -*- coding: utf-8 -*-
+# test various learning methods:
+# BP: back propagation
+# PI: pseudoinverse
+# FA: feedback alignment
+# FA-PI-W: feedback alignment initialized B from random W
+# FA-PI-B: feedback alignment initialized W from random B
 import argparse
 import numpy as np
 import pandas as pd
@@ -7,6 +13,8 @@ import matplotlib.pyplot as plt
 import sklearn.datasets
 import sklearn.cross_validation
 
+## activations.
+# note: dXXX functions are defined to hold df(z = f(y)) = d(f(y))/dy but not df(y) = d(f(y))/dy
 def sigmoid(y): return 1.0 / (1.0 + np.exp(-y))
 def dsigmoid(z): return z * (1.0 - z)
 def tanh(y): return np.tanh(y)
@@ -22,6 +30,7 @@ activation_funcs = {
         'identity': (identity, didentity),
         }
 
+## loss functions
 def mse_loss(y_pred, y_true): return 0.5 * (y_pred -  y_true)**2
 def mse_loss_prime(y_pred, y_true): return y_pred -  y_true
 def softmax(y):
@@ -38,24 +47,62 @@ loss_funcs = {
         'softmax_cross_entropy': (softmax_cross_entropy_loss, softmax_cross_entropy_loss_prime),
         }
 
+## utility
 def add_bias(x):
     assert len(x.shape) == 2
     return np.hstack([x, np.ones((x.shape[0], 1))])
 
+def pseudo_inverse(w):
+    eps = 1.0e-3 # avoid singular matrix
+    if w.shape[0] <= w.shape[1]:
+        b = np.dot(w.T, np.linalg.inv(np.dot(w, w.T) + np.eye(w.shape[0]) * eps))
+    else:
+        b = np.dot(np.linalg.inv(np.dot(w.T, w) + np.eye(w.shape[1]) * eps), w.T)
+    #eye = np.dot(w, b)
+    #print np.diag(eye)
+    return b
+
 class MLP(object):
-    def __init__(self, input_dim, layers, loss_type, verbose=False):
+    def __init__(self, input_dim, layers, loss_type, learning = 'BP', verbose = False):
+        self.backward_weights = []
         self.weights = []
         self.funcs = []
         ch_in = input_dim
         for ch_out, activation_type in layers:
-            w = np.random.randn(ch_out, ch_in + 1) / np.sqrt(ch_out * ch_in)
-            n = min(ch_in, ch_out)
-            for i in range(n):
-                w[i, i] += 1.0/n
+            w = np.random.randn(ch_out, ch_in + 1)
+            if False:
+                n = min(ch_in, ch_out)
+                for i in range(n):
+                    w[i, i] += 1.0/n
+            w /= np.var(w) * np.sqrt(ch_out + ch_in) # Xavier
+            if learning == 'BP':
+                # ordinary back propagation.
+                pass
+            elif learning == 'PI':
+                # use pseudo inverse of w.
+                pass
+            elif learning == 'FA':
+                # "Random feedback weights support learning in deep neural networks", T.P.Lillicrap+, CoRR 2014.
+                w *= 0.01
+                b = np.random.randn(ch_out, ch_in) / np.sqrt(ch_out * ch_in)
+                self.backward_weights.append(b)
+            elif learning == 'FA-PI-W':
+                # Random feedback weights initialized with pseudo inverse pairs. (w determines b)
+                w *= 0.01
+                b = pseudo_inverse(w[:, :-1]).T
+                self.backward_weights.append(b)
+            elif learning == 'FA-PI-B':
+                # Random feedback weights initialized with pseudo inverse pairs. (b determines w)
+                b = np.random.randn(ch_out, ch_in) / np.sqrt(ch_out * ch_in)
+                w = add_bias(pseudo_inverse(b).T) * 0.01
+                self.backward_weights.append(b)
+            else:
+                raise RuntimeError('unknown learning method')
             self.weights.append(w)
             self.funcs.append(activation_funcs[activation_type])
             ch_in = ch_out
         self.loss = loss_funcs[loss_type]
+        self.learning = learning
         self.verbose = verbose
 
     def forward(self, xs_batch):
@@ -70,12 +117,18 @@ class MLP(object):
             if self.verbose: print 'layer %d. %s -> %s' % (i, x.shape, z.shape)
         return z
 
-    def backward(self, delta, lr = 0.001, gradient_noise = 0.0):
+    def backward(self, delta, eta, gradient_noise = 0.0):
         deltas = [delta]
         for i, (w, (_, df)) in list(enumerate(zip(self.weights, self.funcs)))[::-1]:
             delta = deltas[-1]
             if self.verbose: print 'calc delta for layer %d. delta %s -> weight %s' % (i, delta.shape, w.shape)
-            delta = df(self.activations[i]) * np.dot(delta, w[:, :-1])
+            if self.learning == 'BP':
+                delta = df(self.activations[i]) * np.dot(delta, w[:, :-1])
+            elif self.learning == 'PI':
+                b = pseudo_inverse(w[:, :-1]).T
+                delta = df(self.activations[i]) * np.dot(delta, b)
+            elif self.learning in ['FA', 'FA-PI-W', 'FA-PI-B']:
+                delta = df(self.activations[i]) * np.dot(delta, self.backward_weights[i])
             deltas.append(delta)
         deltas.reverse()
 
@@ -88,7 +141,7 @@ class MLP(object):
             diff = np.dot(delta.T, x)
             if gradient_noise > 0:
                 diff += np.random.randn(*diff.shape) * gradient_noise
-            self.weights[i] -= lr * diff
+            self.weights[i] -= eta * diff
 
 
     def fit(self, xs_train, ys_train, xs_validation = None, ys_validation = None,
@@ -120,7 +173,8 @@ class MLP(object):
                     accum_batch_samples += len(batchidx)
                     log.append(dict(n=total_samples + accum_batch_samples, loss=loss/float(accum_batch_samples), acc=acc/float(accum_batch_samples), type='train-intermediate'))
 
-                    self.backward(delta, learning_rate, gradient_noise)
+                    eta = learning_rate / float(len(batchidx))
+                    self.backward(delta, eta, gradient_noise)
                 loss /= float(N_train)
                 acc /= float(N_train)
                 total_samples += N_train
@@ -174,6 +228,8 @@ def plot_fit_log(df_log):
     vmin, vmax = axs[1].get_ylim()
     axs[1].set_ylim(vmin, max(1, vmax))
 
+    return fig, axs
+
 def category_encode(ys):
     assert len(ys.shape) == 1 or len(ys.shape) == 2 and ys.shape[1] == 1
     ys_encoded = np.zeros((ys.shape[0], 1 + np.max(ys)), np.float32)
@@ -190,6 +246,7 @@ def test_digits():
     parser.add_argument('-t', '--test_size', type=float, default=0.2)
     parser.add_argument('-l', '--learning_rate', type=float, default=0.001)
     parser.add_argument('-g', '--gradient_noise', type=float, default=0.0)
+    parser.add_argument('-L', '--learning', default='BP')
     args = parser.parse_args()
 
     np.random.seed(1)
@@ -223,7 +280,8 @@ def test_digits():
         (80, 'relu'),
         (80, 'relu'),
         (n_classes, 'identity'),
-        ], 'softmax_cross_entropy')
+        ], 'softmax_cross_entropy',
+        learning=args.learning)
 
     clf.fit(xs_train, ys_train, xs_test, ys_test,
             batchsize=args.batchsize,
@@ -231,7 +289,10 @@ def test_digits():
             learning_rate=args.learning_rate,
             gradient_noise=args.gradient_noise)
 
-    plot_fit_log(clf.get_fit_log())
+    fig, axs = plot_fit_log(clf.get_fit_log())
+    fig.suptitle('{} classification with {} learning.'.format(
+        args.dataset, args.learning))
+    fig.tight_layout()
     plt.show()
 
 if __name__=='__main__':
