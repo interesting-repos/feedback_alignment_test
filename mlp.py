@@ -38,10 +38,10 @@ def softmax(y):
     return ey / ey.sum(axis=1)[:, np.newaxis]
 def softmax_cross_entropy_loss(y_pred, y_true):
     p_pred = softmax(y_pred)
-    p_true = softmax(y_true)
-    return (- p_true * np.log(p_pred) - (1.0 - p_true) * np.log(1.0 - p_pred)).mean(axis = 1)
+    p_true = y_true
+    return (- p_true * np.log(p_pred) - (1.0 - p_true) * np.log(1.0 - p_pred)).sum(axis=1)
 def softmax_cross_entropy_loss_prime(y_pred, y_true):
-    return y_pred -  y_true
+    return softmax(y_pred) - y_true
 loss_funcs = {
         'mse': (mse_loss, mse_loss_prime),
         'softmax_cross_entropy': (softmax_cross_entropy_loss, softmax_cross_entropy_loss_prime),
@@ -92,7 +92,6 @@ class MLP(object):
                 self.backward_weights.append(b)
             elif learning == 'FA-PI-W':
                 # Random feedback weights initialized with pseudo inverse pairs. (w determines b)
-                w *= 0.01
                 b = pseudo_inverse(w[:, :-1]).T
                 b = normalize_xavier(b, ch_out)
                 self.backward_weights.append(b)
@@ -100,7 +99,7 @@ class MLP(object):
                 # Random feedback weights initialized with pseudo inverse pairs. (b determines w)
                 b = np.random.randn(ch_out, ch_in)
                 b = normalize_xavier(b, ch_out)
-                w = add_bias(pseudo_inverse(b).T) * 0.01
+                w = add_bias(normalize_xavier(pseudo_inverse(b).T, ch_in))
                 self.backward_weights.append(b)
             else:
                 raise RuntimeError('unknown learning method')
@@ -130,12 +129,12 @@ class MLP(object):
             delta = deltas[-1]
             if self.verbose: print 'calc delta for layer %d. delta %s -> weight %s' % (i, delta.shape, w.shape)
             if self.learning == 'BP':
-                delta = df(self.activations[i]) * np.dot(delta, w[:, :-1])
+                transport = w[:, :-1]
             elif self.learning == 'PI':
-                b = pseudo_inverse(w[:, :-1]).T
-                delta = df(self.activations[i]) * np.dot(delta, b)
+                transport = pseudo_inverse(w[:, :-1]).T
             elif self.learning in ['FA', 'FA-PI-W', 'FA-PI-B']:
-                delta = df(self.activations[i]) * np.dot(delta, self.backward_weights[i])
+                transport = self.backward_weights[i]
+            delta = df(self.activations[i]) * np.dot(delta, transport)
             deltas.append(delta)
         deltas.reverse()
 
@@ -267,6 +266,7 @@ def test_digits():
     parser.add_argument('-g', '--gradient_noise', type=float, default=0.0)
     parser.add_argument('-L', '--learning', default='BP')
     parser.add_argument('-T', '--print_test', action='store_true')
+    parser.add_argument('--no_plot', action='store_true')
     args = parser.parse_args()
 
     np.random.seed(1)
@@ -317,7 +317,8 @@ def test_digits():
     fig.suptitle('{} classification with {} learning.'.format(
         args.dataset, args.learning))
     fig.savefig('result_{}_{}.png'.format(args.dataset, args.learning))
-    plt.show()
+    if not args.no_plot:
+        plt.show()
 
 if __name__=='__main__':
     test_digits()
