@@ -20,9 +20,9 @@ def dsigmoid(z): return z * (1.0 - z)
 def tanh(y): return np.tanh(y)
 def dtanh(z): return 1.0 - z**2.0
 def relu(y): return np.maximum(0, y)
-def drelu(y): return (y > 0) * 1.0
+def drelu(z): return (z > 0) * 1.0
 def identity(y): return y
-def didentity(y): return 1.0
+def didentity(z): return 1.0
 activation_funcs = {
         'sigmoid': (sigmoid, dsigmoid),
         'tanh': (tanh, dtanh),
