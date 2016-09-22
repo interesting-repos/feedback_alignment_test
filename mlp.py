@@ -48,6 +48,9 @@ loss_funcs = {
         }
 
 ## utility
+def normalize_xavier(x, n):
+    return x / (np.var(x) * n)
+
 def add_bias(x):
     assert len(x.shape) == 2
     return np.hstack([x, np.ones((x.shape[0], 1))])
@@ -66,15 +69,16 @@ class MLP(object):
     def __init__(self, input_dim, layers, loss_type, learning = 'BP', verbose = False):
         self.backward_weights = []
         self.weights = []
+        self.updateable = []
         self.funcs = []
         ch_in = input_dim
-        for ch_out, activation_type in layers:
+        for ch_out, activation_type, is_updatable in layers:
             w = np.random.randn(ch_out, ch_in + 1)
             if False:
                 n = min(ch_in, ch_out)
                 for i in range(n):
                     w[i, i] += 1.0/n
-            w /= np.var(w) * np.sqrt(ch_out + ch_in) # Xavier
+            w = normalize_xavier(w, np.sqrt(ch_out + ch_in))
             if learning == 'BP':
                 # ordinary back propagation.
                 pass
@@ -83,22 +87,25 @@ class MLP(object):
                 pass
             elif learning == 'FA':
                 # "Random feedback weights support learning in deep neural networks", T.P.Lillicrap+, CoRR 2014.
-                w *= 0.01
-                b = np.random.randn(ch_out, ch_in) / np.sqrt(ch_out * ch_in)
+                w[:, :-1] *= 0 # zero initialize except for the bias.
+                b = normalize_xavier(np.random.randn(ch_out, ch_in), ch_out)
                 self.backward_weights.append(b)
             elif learning == 'FA-PI-W':
                 # Random feedback weights initialized with pseudo inverse pairs. (w determines b)
                 w *= 0.01
                 b = pseudo_inverse(w[:, :-1]).T
+                b = normalize_xavier(b, ch_out)
                 self.backward_weights.append(b)
             elif learning == 'FA-PI-B':
                 # Random feedback weights initialized with pseudo inverse pairs. (b determines w)
-                b = np.random.randn(ch_out, ch_in) / np.sqrt(ch_out * ch_in)
+                b = np.random.randn(ch_out, ch_in)
+                b = normalize_xavier(b, ch_out)
                 w = add_bias(pseudo_inverse(b).T) * 0.01
                 self.backward_weights.append(b)
             else:
                 raise RuntimeError('unknown learning method')
             self.weights.append(w)
+            self.updateable.append(is_updatable)
             self.funcs.append(activation_funcs[activation_type])
             ch_in = ch_out
         self.loss = loss_funcs[loss_type]
@@ -136,6 +143,8 @@ class MLP(object):
             if self.verbose:
                 print 'update layer %d. delta %s, activation %s, weight %s' % (
                         i, delta.shape, self.activations[i].shape, self.weights[i].shape)
+            if not self.updateable[i]:
+                continue
             x = self.activations[i]
             x = add_bias(x)
             diff = np.dot(delta.T, x)
@@ -167,14 +176,13 @@ class MLP(object):
                     ys_batch = ys_train[batchidx]
 
                     ps_batch = self.forward(xs_batch)
-                    delta = self.loss[1](ps_batch, ys_batch)
+                    delta = self.loss[1](ps_batch, ys_batch) / float(len(batchidx))
                     loss += self.loss[0](ps_batch, ys_batch).sum()
                     acc += np.count_nonzero(ys_batch.argmax(axis=1) == ps_batch.argmax(axis=1))
                     accum_batch_samples += len(batchidx)
                     log.append(dict(n=total_samples + accum_batch_samples, loss=loss/float(accum_batch_samples), acc=acc/float(accum_batch_samples), type='train-intermediate'))
 
-                    eta = learning_rate / float(len(batchidx))
-                    self.backward(delta, eta, gradient_noise)
+                    self.backward(delta, learning_rate, gradient_noise)
                 loss /= float(N_train)
                 acc /= float(N_train)
                 total_samples += N_train
@@ -202,6 +210,14 @@ class MLP(object):
 
     def get_fit_log(self): return self.fit_log
 
+    def predict(self, xs_test, batchsize = 64):
+        N_test = xs_test.shape[0]
+        ps = []
+        for i in range(0, N_test, batchsize):
+            batchidx = range(i, min(N_test, i + batchsize))
+            ps.append(self.forward(xs_test[batchidx]))
+        return np.vstack(ps)
+
 def plot_fit_log(df_log):
     fig, axs = plt.subplots(2, 1)
     df_train = df_log[df_log['type'] == 'train-intermediate']
@@ -218,6 +234,8 @@ def plot_fit_log(df_log):
     if len(df_validation) > 0:
         axs[0].plot(df_validation['n'], df_validation['loss'], 'o-', linewidth=1, color='red', label='validation')
         axs[1].plot(df_validation['n'], df_validation['acc'], 'o-', linewidth=1, color='red', label='validation')
+        axs[0].set_title('final train/val. loss = {:.3f}/{:.3f}'.format(df_train.iloc[-1]['loss'], df_validation.iloc[-1]['loss']))
+        axs[1].set_title('final train/val. acc. = {:.3f}/{:.3f}'.format(df_train.iloc[-1]['acc'], df_validation.iloc[-1]['acc']))
 
     axs[0].set_xlabel('# total samples')
     axs[0].set_ylabel('loss')
@@ -228,6 +246,7 @@ def plot_fit_log(df_log):
     vmin, vmax = axs[1].get_ylim()
     axs[1].set_ylim(vmin, max(1, vmax))
 
+    fig.subplots_adjust(hspace=0.5)
     return fig, axs
 
 def category_encode(ys):
@@ -247,6 +266,7 @@ def test_digits():
     parser.add_argument('-l', '--learning_rate', type=float, default=0.001)
     parser.add_argument('-g', '--gradient_noise', type=float, default=0.0)
     parser.add_argument('-L', '--learning', default='BP')
+    parser.add_argument('-T', '--print_test', action='store_true')
     args = parser.parse_args()
 
     np.random.seed(1)
@@ -277,9 +297,9 @@ def test_digits():
     ys_train, ys_test = ys[idx_train], ys[idx_test]
 
     clf = MLP(xs.shape[1], [
-        (80, 'relu'),
-        (80, 'relu'),
-        (n_classes, 'identity'),
+        (80, 'relu', 1),
+        (80, 'relu', 1),
+        (n_classes, 'identity', 1),
         ], 'softmax_cross_entropy',
         learning=args.learning)
 
@@ -289,10 +309,14 @@ def test_digits():
             learning_rate=args.learning_rate,
             gradient_noise=args.gradient_noise)
 
+    if args.print_test:
+        for p, t in zip(clf.predict(xs_test).argmax(axis=1), ys_test.argmax(axis=1)):
+            print p, t, 'o' if p == t else 'x'
+
     fig, axs = plot_fit_log(clf.get_fit_log())
     fig.suptitle('{} classification with {} learning.'.format(
         args.dataset, args.learning))
-    fig.tight_layout()
+    fig.savefig('result_{}_{}.png'.format(args.dataset, args.learning))
     plt.show()
 
 if __name__=='__main__':
