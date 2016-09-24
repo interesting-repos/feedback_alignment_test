@@ -151,9 +151,13 @@ class MLP(object):
                 diff += np.random.randn(*diff.shape) * gradient_noise
             self.weights[i] -= eta * diff
 
+    def weight_decay(self, decay):
+        for i in range(len(self.weights)):
+            # decay weights but not biases
+            self.weights[i][:, :-1] *= decay
 
     def fit(self, xs_train, ys_train, xs_validation = None, ys_validation = None,
-            batchsize = 64, n_epoch = 5, learning_rate = 0.001, gradient_noise = 0.0):
+            batchsize = 64, n_epoch = 5, learning_rate = 0.001, gradient_noise = 0.0, weight_decay = 0.0):
         assert len(xs_train.shape) == 2
         assert xs_train.shape[0] == ys_train.shape[0]
         N_train = len(ys_train)
@@ -182,6 +186,10 @@ class MLP(object):
                     log.append(dict(n=total_samples + accum_batch_samples, loss=loss/float(accum_batch_samples), acc=acc/float(accum_batch_samples), type='train-intermediate'))
 
                     self.backward(delta, learning_rate, gradient_noise)
+
+                    if weight_decay > 0:
+                        self.weight_decay((1.0 - weight_decay) ** len(batchidx))
+
                 loss /= float(N_train)
                 acc /= float(N_train)
                 total_samples += N_train
@@ -264,6 +272,7 @@ def demo():
     parser.add_argument('-t', '--test_size', type=float, default=0.2)
     parser.add_argument('-l', '--learning_rate', type=float, default=0.001)
     parser.add_argument('-g', '--gradient_noise', type=float, default=0.0)
+    parser.add_argument('-w', '--weight_decay', type=float, default=0.0)
     parser.add_argument('-D', '--demo_type', default='single')
     parser.add_argument('-L', '--learning', default='BP')
     parser.add_argument('-T', '--print_test', action='store_true')
@@ -319,7 +328,8 @@ def demo():
                 batchsize=args.batchsize,
                 n_epoch=args.epoch,
                 learning_rate=args.learning_rate,
-                gradient_noise=args.gradient_noise)
+                gradient_noise=args.gradient_noise,
+                weight_decay=args.weight_decay)
 
         if args.print_test:
             for p, t in zip(clf.predict(xs_test).argmax(axis=1), ys_test.argmax(axis=1)):
@@ -346,7 +356,8 @@ def demo():
                         batchsize=args.batchsize,
                         n_epoch=args.epoch,
                         learning_rate=args.learning_rate,
-                        gradient_noise=args.gradient_noise)
+                        gradient_noise=args.gradient_noise,
+                        weight_decay=args.weight_decay)
 
                 df = clf.get_fit_log()
                 df.iloc[:]['learning'] = learning
