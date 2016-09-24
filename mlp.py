@@ -238,10 +238,10 @@ def plot_fit_log(df_log):
 
     axs[0].set_xlabel('# total samples')
     axs[0].set_ylabel('loss')
-    axs[0].legend(loc='best').get_frame().set_alpha(0.5)
+    axs[0].legend(loc='best', fontsize=9).get_frame().set_alpha(0.5)
     axs[1].set_xlabel('# total samples')
     axs[1].set_ylabel('accuracy')
-    axs[1].legend(loc='best').get_frame().set_alpha(0.5)
+    axs[1].legend(loc='best', fontsize=9).get_frame().set_alpha(0.5)
     vmin, vmax = axs[1].get_ylim()
     axs[1].set_ylim(vmin, max(1, vmax))
 
@@ -255,7 +255,7 @@ def category_encode(ys):
         ys_encoded[i, int(ys[i])] = 1.0
     return ys_encoded
 
-def test_digits():
+def demo():
     parser = argparse.ArgumentParser()
     parser.add_argument('-e', '--epoch', type=int, default=10)
     parser.add_argument('-b', '--batchsize', type=int, default=128)
@@ -264,6 +264,7 @@ def test_digits():
     parser.add_argument('-t', '--test_size', type=float, default=0.2)
     parser.add_argument('-l', '--learning_rate', type=float, default=0.001)
     parser.add_argument('-g', '--gradient_noise', type=float, default=0.0)
+    parser.add_argument('-D', '--demo_type', default='single')
     parser.add_argument('-L', '--learning', default='BP')
     parser.add_argument('-T', '--print_test', action='store_true')
     parser.add_argument('--no_plot', action='store_true')
@@ -296,29 +297,90 @@ def test_digits():
     xs_train, xs_test = xs[idx_train], xs[idx_test]
     ys_train, ys_test = ys[idx_train], ys[idx_test]
 
-    clf = MLP(xs.shape[1], [
-        (80, 'relu', 1),
-        (80, 'relu', 1),
-        (n_classes, 'identity', 1),
-        ], 'softmax_cross_entropy',
-        learning=args.learning)
+    hidden_layers = [
+            (80, 'relu', 1),
+            (80, 'relu', 1),
+            ]
+    #hidden_layers = [
+    #        (50, 'tanh', 1),
+    #        (50, 'tanh', 1),
+    #        (50, 'tanh', 1),
+    #        (50, 'tanh', 1),
+    #        (50, 'tanh', 1),
+    #        ]
 
-    clf.fit(xs_train, ys_train, xs_test, ys_test,
-            batchsize=args.batchsize,
-            n_epoch=args.epoch,
-            learning_rate=args.learning_rate,
-            gradient_noise=args.gradient_noise)
+    if args.demo_type == 'single':
+        clf = MLP(xs.shape[1], hidden_layers + [
+            (n_classes, 'identity', 1),
+            ], 'softmax_cross_entropy',
+            learning=args.learning)
 
-    if args.print_test:
-        for p, t in zip(clf.predict(xs_test).argmax(axis=1), ys_test.argmax(axis=1)):
-            print p, t, 'o' if p == t else 'x'
+        clf.fit(xs_train, ys_train, xs_test, ys_test,
+                batchsize=args.batchsize,
+                n_epoch=args.epoch,
+                learning_rate=args.learning_rate,
+                gradient_noise=args.gradient_noise)
 
-    fig, axs = plot_fit_log(clf.get_fit_log())
-    fig.suptitle('{} classification with {} learning.'.format(
-        args.dataset, args.learning))
-    fig.savefig('result_{}_{}.png'.format(args.dataset, args.learning))
+        if args.print_test:
+            for p, t in zip(clf.predict(xs_test).argmax(axis=1), ys_test.argmax(axis=1)):
+                print p, t, 'o' if p == t else 'x'
+
+        fig, axs = plot_fit_log(clf.get_fit_log())
+        fig.suptitle('{} classification with {} learning.'.format(
+            args.dataset, args.learning))
+        fig.savefig('result_{}_{}.png'.format(args.dataset, args.learning))
+
+
+    if args.demo_type == 'compare':
+        learning_methods = ['BP', 'PI', 'FA', 'FA-PI-W', 'FA-PI-B']
+        n_iter = 2
+        logs = []
+        for learning in learning_methods:
+            for iter in range(n_iter):
+                clf = MLP(xs.shape[1], hidden_layers + [
+                    (n_classes, 'identity', 1),
+                    ], 'softmax_cross_entropy',
+                    learning=learning)
+
+                clf.fit(xs_train, ys_train, xs_test, ys_test,
+                        batchsize=args.batchsize,
+                        n_epoch=args.epoch,
+                        learning_rate=args.learning_rate,
+                        gradient_noise=args.gradient_noise)
+
+                df = clf.get_fit_log()
+                df.iloc[:]['learning'] = learning
+                df.iloc[:]['iter'] = iter
+                logs.append(df)
+        logs = pd.concat(logs)
+
+
+        fig, axs = plt.subplots(2, 1)
+        for learning in learning_methods:
+            # grp contains multiple trials.
+            grp = logs[(logs['learning'] == learning) & (logs['type'] == 'validation')].groupby('n')
+            ns = grp['n'].first()
+            loss = grp['loss'].mean()
+            acc = grp['acc'].mean()
+
+            lines = axs[0].plot(ns, loss, '.-', linewidth=1, label=learning)
+            axs[1].plot(ns, acc, '.-', linewidth=1, color=lines[0].get_color(), label=learning)
+
+        axs[0].set_xlabel('# total samples')
+        axs[0].set_ylabel('loss')
+        axs[0].legend(loc='best', fontsize=9).get_frame().set_alpha(0.5)
+        axs[1].set_xlabel('# total samples')
+        axs[1].set_ylabel('accuracy')
+        axs[1].legend(loc='best', fontsize=9).get_frame().set_alpha(0.5)
+        vmin, vmax = axs[1].get_ylim()
+        axs[1].set_ylim(vmin, max(1, vmax))
+        fig.suptitle('{}: mean validation score of {} runs'.format(args.dataset, n_iter))
+        fig.subplots_adjust(hspace=0.5)
+
+        fig.savefig('compare_{}.png'.format(args.dataset))
+
     if not args.no_plot:
         plt.show()
 
 if __name__=='__main__':
-    test_digits()
+    demo()
